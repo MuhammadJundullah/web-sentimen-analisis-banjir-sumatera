@@ -1,0 +1,5 @@
+.env
+be/results
+be/venv
+fe/node_modules
+.bolt
