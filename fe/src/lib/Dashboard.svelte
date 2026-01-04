@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { analysisHistory } from '../stores/analysisStore';
+  import { analysisHistory, type AnalysisHistory } from '../stores/analysisStore';
   import { apiClient, type FetchStatusResponse } from '../services/api';
   import AnalysisResult from './AnalysisResult.svelte';
 
   let tweetText = '';
-  let apiUrl = '';
+  const apiUrl = import.meta.env.VITE_BACKEND_URL ?? '';
   let isLoading = false;
   let error = '';
   let uploadFile: File | null = null;
@@ -22,6 +22,33 @@
   let tokenMessage = '';
   let tokenError = '';
   let isSettingToken = false;
+  let activePage: 'input' | 'upload' | 'fetch' | 'history' = 'input';
+  let historyError = '';
+  let historyMessage = '';
+  let isHistoryLoading = false;
+  let isClearingHistory = false;
+  let deletingHistoryId: number | null = null;
+  let latestAnalysis: AnalysisHistory | null = null;
+
+  function ensureApiUrl(target: 'error' | 'uploadError' | 'fetchError' | 'tokenError' | 'historyError') {
+    if (apiUrl.trim()) {
+      return true;
+    }
+
+    const message = 'URL API Backend belum dikonfigurasi.';
+    if (target === 'error') {
+      error = message;
+    } else if (target === 'uploadError') {
+      uploadError = message;
+    } else if (target === 'fetchError') {
+      fetchError = message;
+    } else if (target === 'tokenError') {
+      tokenError = message;
+    } else if (target === 'historyError') {
+      historyError = message;
+    }
+    return false;
+  }
 
   async function handleAnalysis() {
     if (!tweetText.trim()) {
@@ -29,10 +56,7 @@
       return;
     }
 
-    if (!apiUrl.trim()) {
-      error = 'Mohon masukkan URL API Backend';
-      return;
-    }
+    if (!ensureApiUrl('error')) return;
 
     isLoading = true;
     error = '';
@@ -40,7 +64,19 @@
     try {
       apiClient.setBaseUrl(apiUrl.trim());
       const result = await apiClient.predict(tweetText);
-      analysisHistory.addAnalysis(result);
+      const analysisItem = {
+        id: result.history_id ?? 0,
+        text: result.text,
+        sentiment: result.sentiment ?? null,
+        categories: result.categories ?? [],
+        all_predictions: result.all_predictions,
+        source: result.source ?? 'manual',
+        created_at: result.created_at ?? new Date().toISOString(),
+      };
+      latestAnalysis = analysisItem;
+      if (result.history_id && result.created_at) {
+        analysisHistory.addAnalysis(analysisItem);
+      }
       tweetText = '';
     } catch (err) {
       error = err instanceof Error ? err.message : 'Terjadi kesalahan saat analisis';
@@ -50,10 +86,7 @@
   }
 
   async function handleUpload() {
-    if (!apiUrl.trim()) {
-      uploadError = 'Mohon masukkan URL API Backend';
-      return;
-    }
+    if (!ensureApiUrl('uploadError')) return;
 
     if (!uploadFile) {
       uploadError = 'Mohon pilih file CSV';
@@ -67,9 +100,13 @@
     try {
       apiClient.setBaseUrl(apiUrl.trim());
       const result = await apiClient.uploadCsv(uploadFile);
-      uploadMessage = `Analisis selesai: ${result.total} data diproses.`;
-      uploadSummary = Object.entries(result.sentiment_percentages).map(([label, value]) => ({ label, value }));
-      categorySummary = Object.entries(result.category_percentages).map(([label, value]) => ({ label, value }));
+      uploadMessage = 'Analisis selesai. Persentase siap ditampilkan.';
+      uploadSummary = Object.entries(result.sentiment_percentages)
+        .map(([label, value]) => ({ label, value }))
+        .sort((a, b) => b.value - a.value);
+      categorySummary = Object.entries(result.category_percentages)
+        .map(([label, value]) => ({ label, value }))
+        .sort((a, b) => b.value - a.value);
       uploadFile = null;
     } catch (err) {
       uploadError = err instanceof Error ? err.message : 'Gagal upload CSV';
@@ -79,10 +116,7 @@
   }
 
   async function handleFetchNow() {
-    if (!apiUrl.trim()) {
-      fetchError = 'Mohon masukkan URL API Backend';
-      return;
-    }
+    if (!ensureApiUrl('fetchError')) return;
 
     isFetching = true;
     fetchError = '';
@@ -101,10 +135,7 @@
   }
 
   async function handleSetToken() {
-    if (!apiUrl.trim()) {
-      tokenError = 'Mohon masukkan URL API Backend';
-      return;
-    }
+    if (!ensureApiUrl('tokenError')) return;
 
     if (!tokenInput.trim()) {
       tokenError = 'Mohon masukkan Bearer Token';
@@ -140,8 +171,59 @@
     }
   }
 
-  function clearHistory() {
-    analysisHistory.clearHistory();
+  async function loadHistory() {
+    if (!ensureApiUrl('historyError')) return;
+
+    isHistoryLoading = true;
+    historyError = '';
+    historyMessage = '';
+
+    try {
+      apiClient.setBaseUrl(apiUrl.trim());
+      const result = await apiClient.getHistory(100, 0);
+      analysisHistory.setHistory(result);
+    } catch (err) {
+      historyError = err instanceof Error ? err.message : 'Gagal memuat history';
+    } finally {
+      isHistoryLoading = false;
+    }
+  }
+
+  async function handleDeleteHistory(id: number) {
+    if (!ensureApiUrl('historyError')) return;
+    if (deletingHistoryId) return;
+
+    deletingHistoryId = id;
+    historyError = '';
+
+    try {
+      apiClient.setBaseUrl(apiUrl.trim());
+      await apiClient.deleteHistoryItem(id);
+      analysisHistory.removeHistory(id);
+    } catch (err) {
+      historyError = err instanceof Error ? err.message : 'Gagal menghapus history';
+    } finally {
+      deletingHistoryId = null;
+    }
+  }
+
+  async function handleClearHistory() {
+    if (!ensureApiUrl('historyError')) return;
+
+    isClearingHistory = true;
+    historyError = '';
+    historyMessage = '';
+
+    try {
+      apiClient.setBaseUrl(apiUrl.trim());
+      await apiClient.clearHistory();
+      analysisHistory.clearHistory();
+      historyMessage = 'Semua history berhasil dihapus.';
+    } catch (err) {
+      historyError = err instanceof Error ? err.message : 'Gagal menghapus semua history';
+    } finally {
+      isClearingHistory = false;
+    }
   }
 
   function handleFileChange(event: Event) {
@@ -158,6 +240,7 @@
 
   onMount(() => {
     loadFetchStatus();
+    loadHistory();
     const interval = setInterval(loadFetchStatus, 30000);
     return () => clearInterval(interval);
   });
@@ -174,60 +257,99 @@
       </p>
     </header>
 
-    <div class="bg-white rounded-2xl shadow-xl p-6 md:p-8 mb-8 border border-gray-100">
-      <div class="mb-6">
-        <label for="apiUrl" class="block text-sm font-semibold text-gray-700 mb-2">
-          URL API Backend
-        </label>
-        <input
-          id="apiUrl"
-          type="text"
-          bind:value={apiUrl}
-          placeholder="https://huggingface.co/spaces/username/projectname"
-          class="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-        />
+    <nav class="flex flex-wrap justify-center gap-3 mb-8">
+      <button
+        on:click={() => (activePage = 'input')}
+        class={`px-5 py-2.5 rounded-full text-sm font-semibold transition-all ${
+          activePage === 'input'
+            ? 'bg-blue-600 text-white shadow-md'
+            : 'bg-white text-gray-600 border border-gray-200 hover:bg-blue-50'
+        }`}
+      >
+        Input Tweet
+      </button>
+      <button
+        on:click={() => (activePage = 'upload')}
+        class={`px-5 py-2.5 rounded-full text-sm font-semibold transition-all ${
+          activePage === 'upload'
+            ? 'bg-blue-600 text-white shadow-md'
+            : 'bg-white text-gray-600 border border-gray-200 hover:bg-blue-50'
+        }`}
+      >
+        Upload CSV
+      </button>
+      <button
+        on:click={() => (activePage = 'fetch')}
+        class={`px-5 py-2.5 rounded-full text-sm font-semibold transition-all ${
+          activePage === 'fetch'
+            ? 'bg-blue-600 text-white shadow-md'
+            : 'bg-white text-gray-600 border border-gray-200 hover:bg-blue-50'
+        }`}
+      >
+        Fetch Periodik
+      </button>
+      <button
+        on:click={() => (activePage = 'history')}
+        class={`px-5 py-2.5 rounded-full text-sm font-semibold transition-all ${
+          activePage === 'history'
+            ? 'bg-blue-600 text-white shadow-md'
+            : 'bg-white text-gray-600 border border-gray-200 hover:bg-blue-50'
+        }`}
+      >
+        Riwayat
+      </button>
+    </nav>
+
+    {#if activePage === 'input'}
+      <div class="bg-white rounded-2xl shadow-xl p-6 md:p-8 mb-8 border border-gray-100">
+        <div class="mb-6">
+          <label for="tweetInput" class="block text-sm font-semibold text-gray-700 mb-2">
+            Masukkan Teks Tweet
+          </label>
+          <textarea
+            id="tweetInput"
+            bind:value={tweetText}
+            placeholder="Contoh: Bantuan makanan belum sampai di posko pengungsian desa A."
+            rows="5"
+            class="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none"
+          />
+        </div>
+
+        {#if error}
+          <div class="mb-6 p-4 bg-red-50 border-l-4 border-red-500 text-red-700 rounded">
+            <p class="font-medium">{error}</p>
+          </div>
+        {/if}
+
+        <button
+          on:click={handleAnalysis}
+          disabled={isLoading}
+          class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-semibold py-4 px-6 rounded-lg transition-all duration-200 transform hover:scale-[1.02] active:scale-[0.98] disabled:transform-none disabled:cursor-not-allowed shadow-lg"
+        >
+          {#if isLoading}
+            <span class="inline-flex items-center gap-2">
+              <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              Menganalisis...
+            </span>
+          {:else}
+            Analisis Tweet
+          {/if}
+        </button>
       </div>
 
-      <div class="mb-6">
-        <label for="tweetInput" class="block text-sm font-semibold text-gray-700 mb-2">
-          Masukkan Teks Tweet
-        </label>
-        <textarea
-          id="tweetInput"
-          bind:value={tweetText}
-          placeholder="Contoh: Bantuan makanan belum sampai di posko pengungsian desa A."
-          rows="5"
-          class="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none"
-        />
-      </div>
-
-      {#if error}
-        <div class="mb-6 p-4 bg-red-50 border-l-4 border-red-500 text-red-700 rounded">
-          <p class="font-medium">{error}</p>
+      {#if latestAnalysis}
+        <div class="bg-white rounded-2xl shadow-md p-6 md:p-8 mb-8 border border-gray-100">
+          <h3 class="text-xl font-bold text-gray-800 mb-4">Hasil Terbaru</h3>
+          <AnalysisResult analysis={latestAnalysis} />
         </div>
       {/if}
+    {/if}
 
-      <button
-        on:click={handleAnalysis}
-        disabled={isLoading}
-        class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-semibold py-4 px-6 rounded-lg transition-all duration-200 transform hover:scale-[1.02] active:scale-[0.98] disabled:transform-none disabled:cursor-not-allowed shadow-lg"
-      >
-        {#if isLoading}
-          <span class="inline-flex items-center gap-2">
-            <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            Menganalisis...
-          </span>
-        {:else}
-          Analisis Tweet
-        {/if}
-      </button>
-    </div>
-
-    <div class="grid gap-6 md:grid-cols-2 mb-8">
-      <div class="bg-white rounded-2xl shadow-md p-6 border border-gray-100">
+    {#if activePage === 'upload'}
+      <div class="bg-white rounded-2xl shadow-md p-6 md:p-8 mb-8 border border-gray-100">
         <h3 class="text-xl font-bold text-gray-800 mb-4">Upload Data CSV</h3>
         <input
           type="file"
@@ -251,11 +373,19 @@
         {#if uploadSummary.length > 0}
           <div class="mt-4">
             <h4 class="text-sm font-semibold text-gray-700 mb-2">Distribusi Sentimen</h4>
-            <div class="space-y-2 text-sm text-gray-600">
+            <div class="space-y-3 text-sm text-gray-600">
               {#each uploadSummary as item}
-                <div class="flex justify-between">
-                  <span>{item.label}</span>
-                  <span class="font-semibold">{item.value.toFixed(1)}%</span>
+                <div>
+                  <div class="flex justify-between mb-1">
+                    <span class="font-medium text-gray-700">{item.label}</span>
+                    <span class="font-semibold">{item.value.toFixed(1)}%</span>
+                  </div>
+                  <div class="h-2 bg-gray-100 rounded-full overflow-hidden">
+                    <div
+                      class="h-full bg-blue-500"
+                      style={`width: ${Math.min(item.value, 100)}%`}
+                    />
+                  </div>
                 </div>
               {/each}
             </div>
@@ -265,11 +395,19 @@
         {#if categorySummary.length > 0}
           <div class="mt-4">
             <h4 class="text-sm font-semibold text-gray-700 mb-2">Distribusi Kategori</h4>
-            <div class="space-y-2 text-sm text-gray-600 max-h-48 overflow-y-auto pr-2">
+            <div class="space-y-3 text-sm text-gray-600 max-h-56 overflow-y-auto pr-2">
               {#each categorySummary as item}
-                <div class="flex justify-between">
-                  <span>{item.label}</span>
-                  <span class="font-semibold">{item.value.toFixed(1)}%</span>
+                <div>
+                  <div class="flex justify-between mb-1">
+                    <span class="font-medium text-gray-700">{item.label}</span>
+                    <span class="font-semibold">{item.value.toFixed(1)}%</span>
+                  </div>
+                  <div class="h-2 bg-gray-100 rounded-full overflow-hidden">
+                    <div
+                      class="h-full bg-emerald-500"
+                      style={`width: ${Math.min(item.value, 100)}%`}
+                    />
+                  </div>
                 </div>
               {/each}
             </div>
@@ -288,8 +426,10 @@
           {/if}
         </button>
       </div>
+    {/if}
 
-      <div class="bg-white rounded-2xl shadow-md p-6 border border-gray-100">
+    {#if activePage === 'fetch'}
+      <div class="bg-white rounded-2xl shadow-md p-6 md:p-8 mb-8 border border-gray-100">
         <h3 class="text-xl font-bold text-gray-800 mb-2">Fetch Tweet Periodik</h3>
         <p class="text-sm text-gray-600 mb-4">
           Sistem mengambil data setiap 2 jam (atau sesuai konfigurasi backend).
@@ -374,32 +514,78 @@
           </button>
         </div>
       </div>
-    </div>
+    {/if}
 
-    {#if $analysisHistory.length > 0}
-      <div class="mb-6 flex justify-between items-center">
-        <h2 class="text-2xl font-bold text-gray-800">
-          Riwayat Analisis ({$analysisHistory.length})
-        </h2>
-        <button
-          on:click={clearHistory}
-          class="px-4 py-2 text-sm text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors font-medium"
-        >
-          Hapus Riwayat
-        </button>
-      </div>
+    {#if activePage === 'history'}
+      <div class="bg-white rounded-2xl shadow-md p-6 md:p-8 mb-8 border border-gray-100">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
+          <div>
+            <h2 class="text-2xl font-bold text-gray-800">
+              Riwayat Analisis ({$analysisHistory.length})
+            </h2>
+            <p class="text-sm text-gray-500">
+              Data diambil dari hasil analisis manual di dashboard ini.
+            </p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button
+              on:click={loadHistory}
+              class="px-4 py-2 text-sm text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors font-medium"
+            >
+              Refresh
+            </button>
+            <button
+              on:click={handleClearHistory}
+              disabled={isClearingHistory}
+              class="px-4 py-2 text-sm text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors font-medium disabled:cursor-not-allowed disabled:text-gray-400"
+            >
+              {#if isClearingHistory}
+                Menghapus...
+              {:else}
+                Hapus Semua
+              {/if}
+            </button>
+          </div>
+        </div>
 
-      <div class="grid gap-6 md:grid-cols-2">
-        {#each $analysisHistory as analysis (analysis.id)}
-          <AnalysisResult {analysis} />
-        {/each}
-      </div>
-    {:else}
-      <div class="text-center py-12 bg-white rounded-2xl shadow-md border border-gray-100">
-        <svg class="mx-auto h-16 w-16 text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-        </svg>
-        <p class="text-gray-500 text-lg">Belum ada analisis. Mulai dengan memasukkan teks tweet di atas.</p>
+        {#if historyError}
+          <div class="mb-4 p-3 bg-red-50 border-l-4 border-red-500 text-red-700 rounded">
+            <p class="font-medium">{historyError}</p>
+          </div>
+        {/if}
+
+        {#if historyMessage}
+          <div class="mb-4 p-3 bg-green-50 border-l-4 border-green-500 text-green-700 rounded">
+            <p class="font-medium">{historyMessage}</p>
+          </div>
+        {/if}
+
+        {#if isHistoryLoading}
+          <div class="py-10 text-center text-gray-500">Memuat history...</div>
+        {:else if $analysisHistory.length === 0}
+          <div class="text-center py-12 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+            <p class="text-gray-500 text-lg">Belum ada history yang tersimpan.</p>
+          </div>
+        {:else}
+          <div class="grid gap-6 md:grid-cols-2">
+            {#each $analysisHistory as analysis (analysis.id)}
+              <div class="relative">
+                <button
+                  on:click={() => handleDeleteHistory(analysis.id)}
+                  disabled={deletingHistoryId === analysis.id}
+                  class="absolute top-4 right-4 text-xs text-red-600 hover:text-red-700 bg-white/90 px-3 py-1 rounded-full shadow border border-gray-100 disabled:cursor-not-allowed disabled:text-gray-400"
+                >
+                  {#if deletingHistoryId === analysis.id}
+                    Menghapus...
+                  {:else}
+                    Hapus
+                  {/if}
+                </button>
+                <AnalysisResult {analysis} />
+              </div>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
   </div>

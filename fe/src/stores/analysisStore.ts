@@ -1,27 +1,21 @@
 import { writable } from 'svelte/store';
-import type { PredictionResponse } from '../services/api';
+import type { AnalysisHistoryItem } from '../services/api';
 
-export interface AnalysisHistory extends PredictionResponse {
-  id: string;
-  timestamp: Date;
-}
+export type AnalysisHistory = AnalysisHistoryItem;
 
 function createAnalysisStore() {
-  const { subscribe, update } = writable<AnalysisHistory[]>([]);
+  const { subscribe, update, set } = writable<AnalysisHistory[]>([]);
 
   return {
     subscribe,
-    addAnalysis: (analysis: PredictionResponse) => {
-      const historyItem: AnalysisHistory = {
-        ...analysis,
-        id: crypto.randomUUID(),
-        timestamp: new Date(),
-      };
-      update(history => [historyItem, ...history]);
+    setHistory: (items: AnalysisHistory[]) => set(items),
+    addAnalysis: (analysis: AnalysisHistory) => {
+      update(history => [analysis, ...history]);
     },
-    clearHistory: () => {
-      update(() => []);
+    removeHistory: (id: number) => {
+      update(history => history.filter(item => item.id !== id));
     },
+    clearHistory: () => set([]),
   };
 }
 

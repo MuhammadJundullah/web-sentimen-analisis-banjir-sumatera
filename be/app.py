@@ -3,8 +3,9 @@ from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 import os
-from typing import List, Dict
+from typing import List, Dict, Any
 import logging
+from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -16,6 +17,12 @@ logger = logging.getLogger("uas-ml")
 from csv_loader import parse_csv_text
 from twitter_fetcher import fetch_recent_tweets
 from tweepy.errors import TooManyRequests
+from db import (
+    insert_analysis_history,
+    fetch_analysis_history,
+    delete_analysis_history,
+    clear_analysis_history,
+)
 
 # --- Inisialisasi App ---
 app = FastAPI(
@@ -133,11 +140,12 @@ class APIResponse(BaseModel):
     sentiment: PredictionResult | None # Positif/Netral/Negatif
     categories: List[PredictionResult] # Kritik, Logistik, dll
     all_predictions: Dict[str, float]  # Raw data untuk debug
+    history_id: int | None = None
+    created_at: datetime | None = None
+    source: str | None = None
 
 
 class CsvAnalysisResponse(BaseModel):
-    total: int
-    skipped: int
     sentiment_percentages: Dict[str, float]
     category_percentages: Dict[str, float]
 
@@ -148,6 +156,16 @@ class FetchRequest(BaseModel):
 
 class TokenRequest(BaseModel):
     token: str
+
+
+class AnalysisHistoryResponse(BaseModel):
+    id: int
+    text: str
+    sentiment: PredictionResult | None
+    categories: List[PredictionResult]
+    all_predictions: Dict[str, Any] | None = None
+    source: str
+    created_at: datetime
 
 # --- Logic Prediksi ---
 @app.post("/predict", response_model=APIResponse)
@@ -172,35 +190,48 @@ async def predict(payload: TweetRequest):
     sentiment_result = None
     categories_result = []
     all_preds = {}
-    
+
     # Daftar label sentimen (Hardcoded sesuai label training Anda)
     SENTIMENT_LABELS = ["Positif", "Netral", "Negatif"]
+    sentiment_scores: Dict[str, float] = {}
 
     for i, prob in enumerate(probs):
         score = float(prob)
         label_name = id2label[i]
         all_preds[label_name] = score
-        
-        # Filter berdasarkan Threshold 0.5
-        if score > 0.5:
-            res = PredictionResult(label=label_name, score=score)
-            
-            if label_name in SENTIMENT_LABELS:
-                # Jika ada multiple sentiment (jarang terjadi), ambil yang score-nya tertinggi
-                if sentiment_result is None or score > sentiment_result.score:
-                    sentiment_result = res
-            else:
-                categories_result.append(res)
-    
-    # Fallback jika tidak ada sentimen terdeteksi (anggap Netral)
-    if sentiment_result is None:
-        sentiment_result = PredictionResult(label="Netral", score=0.0)
+
+        if label_name in SENTIMENT_LABELS:
+            sentiment_scores[label_name] = score
+        elif score > 0.5:
+            categories_result.append(PredictionResult(label=label_name, score=score))
+
+    # Ambil sentiment dengan score tertinggi (tanpa memaksa Netral)
+    if sentiment_scores:
+        best_label = max(sentiment_scores, key=sentiment_scores.get)
+        sentiment_result = PredictionResult(label=best_label, score=sentiment_scores[best_label])
+
+    history_payload = {
+        "text": text,
+        "sentiment_label": sentiment_result.label if sentiment_result else None,
+        "sentiment_score": sentiment_result.score if sentiment_result else None,
+        "categories": [{"label": category.label, "score": category.score} for category in categories_result],
+        "all_predictions": all_preds,
+        "source": "manual",
+    }
+    history_entry = None
+    try:
+        history_entry = insert_analysis_history(history_payload)
+    except Exception as exc:
+        logger.warning("Gagal menyimpan history analisis: %s", exc)
 
     return APIResponse(
         text=text,
         sentiment=sentiment_result,
         categories=categories_result,
-        all_predictions=all_preds
+        all_predictions=all_preds,
+        history_id=history_entry["id"] if history_entry else None,
+        created_at=history_entry["created_at"] if history_entry else None,
+        source="manual",
     )
 
 
@@ -214,6 +245,10 @@ def analyze_texts(texts: list[str]) -> tuple[Dict[str, int], Dict[str, int]]:
     batch_size = 16
 
     SENTIMENT_LABELS = {"Positif", "Netral", "Negatif"}
+    all_labels = list(id2label.values())
+    category_labels = [label for label in all_labels if label not in SENTIMENT_LABELS]
+    sentiment_counts = {label: 0 for label in SENTIMENT_LABELS}
+    category_counts = {label: 0 for label in category_labels}
 
     for start in range(0, len(texts), batch_size):
         batch = texts[start : start + batch_size]
@@ -226,23 +261,39 @@ def analyze_texts(texts: list[str]) -> tuple[Dict[str, int], Dict[str, int]]:
         probs = torch.sigmoid(outputs.logits).cpu()
 
         for row in probs:
-            sentiment_result = None
+            sentiment_scores: Dict[str, float] = {}
             for i, prob in enumerate(row):
                 score = float(prob)
                 label_name = id2label[i]
-                if score > 0.5:
-                    if label_name in SENTIMENT_LABELS:
-                        if sentiment_result is None or score > sentiment_result[1]:
-                            sentiment_result = (label_name, score)
-                    else:
-                        category_counts[label_name] = category_counts.get(label_name, 0) + 1
+                if label_name in SENTIMENT_LABELS:
+                    sentiment_scores[label_name] = score
+                elif score > 0.5:
+                    category_counts[label_name] = category_counts.get(label_name, 0) + 1
 
-            if sentiment_result is None:
-                sentiment_counts["Netral"] = sentiment_counts.get("Netral", 0) + 1
-            else:
-                sentiment_counts[sentiment_result[0]] = sentiment_counts.get(sentiment_result[0], 0) + 1
+            if sentiment_scores:
+                best_label = max(sentiment_scores, key=sentiment_scores.get)
+                sentiment_counts[best_label] = sentiment_counts.get(best_label, 0) + 1
 
     return sentiment_counts, category_counts
+
+
+def build_history_response(row: dict) -> dict:
+    sentiment = None
+    if row.get("sentiment_label"):
+        sentiment = {
+            "label": row.get("sentiment_label"),
+            "score": row.get("sentiment_score"),
+        }
+
+    return {
+        "id": row.get("id"),
+        "text": row.get("text"),
+        "sentiment": sentiment,
+        "categories": row.get("categories") or [],
+        "all_predictions": row.get("all_predictions") or {},
+        "source": row.get("source") or "manual",
+        "created_at": row.get("created_at"),
+    }
 
 
 @app.post("/upload-csv", response_model=CsvAnalysisResponse)
@@ -260,12 +311,48 @@ async def upload_csv(file: UploadFile = File(...)):
     sentiment_percentages = {label: (count / total) * 100 for label, count in sentiment_counts.items()}
     category_percentages = {label: (count / total) * 100 for label, count in category_counts.items()}
 
+    history_payload = {
+        "text": f"Upload CSV: {file.filename}",
+        "sentiment_label": None,
+        "sentiment_score": None,
+        "categories": [],
+        "all_predictions": {
+            "sentiment_percentages": sentiment_percentages,
+            "category_percentages": category_percentages,
+            "total": total,
+            "skipped": skipped,
+        },
+        "source": "csv",
+    }
+    try:
+        insert_analysis_history(history_payload)
+    except Exception as exc:
+        logger.warning("Gagal menyimpan history upload CSV: %s", exc)
+
     return CsvAnalysisResponse(
-        total=total,
-        skipped=skipped,
         sentiment_percentages=sentiment_percentages,
         category_percentages=category_percentages,
     )
+
+
+@app.get("/analysis-history", response_model=List[AnalysisHistoryResponse])
+async def get_analysis_history(limit: int = 50, offset: int = 0):
+    rows = fetch_analysis_history(limit=limit, offset=offset)
+    return [build_history_response(row) for row in rows]
+
+
+@app.delete("/analysis-history/{item_id}")
+async def delete_analysis_history_endpoint(item_id: int):
+    deleted = delete_analysis_history(item_id)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="History tidak ditemukan.")
+    return {"deleted": item_id}
+
+
+@app.delete("/analysis-history")
+async def clear_analysis_history_endpoint():
+    deleted = clear_analysis_history()
+    return {"deleted": deleted}
 
 
 @app.post("/fetch-tweets")

@@ -10,14 +10,15 @@ export interface CategoryResult {
 
 export interface PredictionResponse {
   text: string;
-  sentiment: SentimentResult;
+  sentiment: SentimentResult | null;
   categories: CategoryResult[];
   all_predictions?: any;
+  history_id?: number;
+  created_at?: string;
+  source?: string;
 }
 
 export interface CsvUploadResponse {
-  total: number;
-  skipped: number;
   sentiment_percentages: Record<string, number>;
   category_percentages: Record<string, number>;
 }
@@ -34,6 +35,16 @@ export interface FetchStatusResponse {
   last_error: string | null;
   last_count: number;
   last_inserted: number;
+}
+
+export interface AnalysisHistoryItem {
+  id: number;
+  text: string;
+  sentiment: SentimentResult | null;
+  categories: CategoryResult[];
+  all_predictions?: any;
+  source: string;
+  created_at: string;
 }
 
 export interface AnalysisRequest {
@@ -122,6 +133,33 @@ export class DisasterAPI {
     });
 
     return this.handleResponse<{ status: string }>(response);
+  }
+
+  async getHistory(limit = 50, offset = 0): Promise<AnalysisHistoryItem[]> {
+    const response = await fetch(
+      `${this.baseUrl}/analysis-history?limit=${limit}&offset=${offset}`,
+      {
+        method: 'GET',
+      }
+    );
+
+    return this.handleResponse<AnalysisHistoryItem[]>(response);
+  }
+
+  async deleteHistoryItem(id: number): Promise<{ deleted: number }> {
+    const response = await fetch(`${this.baseUrl}/analysis-history/${id}`, {
+      method: 'DELETE',
+    });
+
+    return this.handleResponse<{ deleted: number }>(response);
+  }
+
+  async clearHistory(): Promise<{ deleted: number }> {
+    const response = await fetch(`${this.baseUrl}/analysis-history`, {
+      method: 'DELETE',
+    });
+
+    return this.handleResponse<{ deleted: number }>(response);
   }
 }
 

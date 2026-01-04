@@ -1,5 +1,6 @@
 .env
 be/results
+be/results-old
 be/venv
 fe/node_modules
 .bolt
