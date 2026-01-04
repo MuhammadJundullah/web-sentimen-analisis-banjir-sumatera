@@ -250,7 +250,7 @@
   <div class="max-w-6xl mx-auto">
     <header class="text-center mb-8">
       <h1 class="text-4xl md:text-5xl font-bold text-gray-800 mb-3">
-        Dashboard Monitoring Bencana
+        Dashboard Monitoring Sentimen Terkait Banjir & Longsor Sumatera di Platform X
       </h1>
       <p class="text-gray-600 text-lg">
         Analisis sentimen dan kategori dari tweet terkait bencana
